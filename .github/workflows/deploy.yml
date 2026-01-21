@@ -77,4 +77,4 @@ jobs:
 #         # Releaseビルドでテストする場合、--release を追加してください
 #         run: |
 #           maturin develop --features python
-#           python -c "import nx_compute_rs; print(f'Test Result: {nx_compute_rs.compute_metrics(1000, 1.0)}')"
+#           python -c "import gs_slam_ccelerator; print(f'Test Result: {gs_slam_ccelerator.compute_metrics(1000, 1.0)}')"

@@ -1,4 +1,4 @@
-import init, { compute_metrics_js } from './pkg/nx_compute_rs.js';
+import init, { compute_metrics_js } from './pkg/gs_slam_ccelerator.js';
 
 async function run() {
     await init(); // Initialize WASM
