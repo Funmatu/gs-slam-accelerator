@@ -6,6 +6,7 @@ use pyo3::prelude::*;
 use memmap2::MmapOptions;
 use bytemuck::{Pod, Zeroable};
 use wgpu::util::DeviceExt;
+use wgpu::InstanceFlags; 
 
 // -----------------------------------------------------------------------------
 // 1. Data Structures
@@ -59,6 +60,7 @@ async fn run_compute_shader(splats: &[GaussianSplat]) -> Vec<Surfel> {
         // backends: wgpu::Backends::all(), 
         backends: wgpu::Backends::VULKAN,
         // backends: wgpu::Backends::PRIMARY, 
+        flags: InstanceFlags::empty(),
         ..Default::default()
     });
     
