@@ -8,6 +8,7 @@ async function run() {
     const canvas = document.getElementById('canvas');
     const btnRGB = document.getElementById('btnRGB');
     const btnNormal = document.getElementById('btnNormal');
+    const btnExport = document.getElementById('btnExport');
 
     // Resize Handling
     function resize() {
@@ -36,12 +37,14 @@ async function run() {
             if (!file) return;
 
             statusDiv.innerText = `Loading ${file.name}...`;
+            btnExport.disabled = true;
             try {
                 const buffer = await file.arrayBuffer();
                 const data = new Uint8Array(buffer);
                 console.log(`Passing ${data.length} bytes to WASM`);
                 viewer.load_data(data);
                 statusDiv.innerText = `Rendering ${file.name} (${(data.length/1024/1024).toFixed(1)} MB)`;
+                btnExport.disabled = false;
             } catch (err) {
                 console.error(err);
                 statusDiv.innerText = "Error loading file";
@@ -58,6 +61,34 @@ async function run() {
             viewer.set_display_mode(1);
             btnRGB.classList.remove('active');
             btnNormal.classList.add('active');
+        };
+
+        // Export Functionality
+        btnExport.onclick = () => {
+            if (!window.viewer) return;
+            statusDiv.innerText = "Generating PLY...";
+            
+            // Allow UI update before freezing for generation
+            setTimeout(() => {
+                try {
+                    const data = window.viewer.export_ply();
+                    const blob = new Blob([data], { type: 'application/octet-stream' });
+                    const url = URL.createObjectURL(blob);
+                    
+                    const a = document.createElement('a');
+                    a.href = url;
+                    a.download = "processed_geometry.ply";
+                    document.body.appendChild(a);
+                    a.click();
+                    document.body.removeChild(a);
+                    URL.revokeObjectURL(url);
+                    
+                    statusDiv.innerText = "Export Complete.";
+                } catch (e) {
+                    console.error(e);
+                    statusDiv.innerText = "Export Failed.";
+                }
+            }, 10);
         };
 
     } catch (e) {
