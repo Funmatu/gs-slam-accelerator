@@ -3,28 +3,40 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>gs-slam-ccelerator Demo</title>
+    <title>GS-SLAM Phase 3 Viewer</title>
     <style>
-        body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; max-width: 800px; margin: 2rem auto; padding: 0 1rem; line-height: 1.6; }
-        h1 { border-bottom: 2px solid #eee; padding-bottom: 0.5rem; }
-        .card { border: 1px solid #ddd; padding: 1.5rem; border-radius: 8px; box-shadow: 0 2px 4px rgba(0,0,0,0.05); }
-        button { background-color: #0070f3; color: white; border: none; padding: 0.8rem 1.5rem; border-radius: 5px; cursor: pointer; font-size: 1rem; }
-        button:hover { background-color: #005bb5; }
-        button:disabled { background-color: #ccc; cursor: not-allowed; }
-        #output { margin-top: 1rem; padding: 1rem; background: #f5f5f5; border-radius: 5px; font-family: monospace; }
+        body { margin: 0; background: #222; color: #eee; font-family: sans-serif; overflow: hidden; }
+        canvas { width: 100%; height: 100vh; display: block; }
+        #ui {
+            position: absolute; top: 10px; left: 10px;
+            background: rgba(0, 0, 0, 0.8); padding: 15px; border-radius: 8px;
+            display: flex; flex-direction: column; gap: 10px; pointer-events: none;
+        }
+        #ui > * { pointer-events: auto; }
+        button { padding: 5px 10px; cursor: pointer; background: #444; color: white; border: 1px solid #666; }
+        button:hover { background: #555; }
+        button.active { background: #0077cc; border-color: #0099ff; }
+        #status { font-size: 0.9em; color: #aaa; }
     </style>
 </head>
 <body>
-    <h1>gs-slam-ccelerator</h1>
-    <p>R&D Dual-Runtime Architecture Proof of Concept.</p>
-    
-    <div class="card">
-        <h3>WebAssembly Computation</h3>
-        <p>Run the rigorous Rust backend directly in your browser.</p>
-        <button id="run-btn" disabled>Loading WASM...</button>
-        <div id="output">Waiting for input...</div>
+    <div id="ui">
+        <h3>GS-SLAM Viewer</h3>
+        <div>
+            <input type="file" id="fileInput" accept=".ply">
+        </div>
+        <div>
+            <label>Mode:</label>
+            <button id="btnRGB" class="active">RGB Color</button>
+            <button id="btnNormal">Normal Map</button>
+        </div>
+        <div id="status">Waiting for PLY...</div>
+        <div style="font-size: 0.8em; margin-top: 5px;">
+            Left: Rotate | Right: Pan | Wheel: Zoom
+        </div>
     </div>
-
+    <canvas id="canvas"></canvas>
+    
     <script type="module" src="./index.js"></script>
 </body>
 </html>

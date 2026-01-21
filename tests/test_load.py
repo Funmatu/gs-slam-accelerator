@@ -1,26 +1,32 @@
 import gs_slam_core
-import time
-import os
+import numpy as np
 
-# Ensure you have a valid .ply file from a 3DGS training result
-ply_file = "data/object_0.ply"
+ply_path = "data/object_0.ply"
+print(f"Loading {ply_path}...")
 
-if not os.path.exists(ply_file):
-    print(f"Please provide a valid path. File not found: {ply_file}")
-    exit(1)
+try:
+    manager = gs_slam_core.SplatManager(ply_path)
+    count = manager.count()
+    print(f"Successfully loaded {count} splats.")
 
-print(f"Loading {ply_file}...")
-start_time = time.time()
+    # 最初のデータの検証 (インデックス0)
+    pos = manager.get_splat_pos(0)
+    rot = manager.get_splat_rot(0)
+    sh = manager.get_splat_sh(0)
 
-# This triggers Rust mmap + parsing
-manager = gs_slam_core.SplatManager(ply_file)
+    print("-" * 40)
+    print(f"Index 0 Check:")
+    print(f"  Pos: {pos}")
+    print(f"  Rot: {rot}")
+    print(f"  SH:  {sh}")
+    print("-" * 40)
 
-end_time = time.time()
-elapsed = (end_time - start_time) * 1000
+    # データがゼロでないことを確認
+    assert count > 0, "No splats loaded!"
+    assert len(pos) == 3, "Position dimension mismatch"
+    assert len(rot) == 4, "Rotation dimension mismatch"
 
-count = manager.count()
-print(f"--------------------------------------------------")
-print(f"Loaded {count:,} splats in {elapsed:.2f} ms")
-print(f"Throughput: {count / (elapsed / 1000) / 1_000_000:.2f} M splats/sec")
-print(f"First Splat Data: {manager.debug_first_splat()}")
-print(f"--------------------------------------------------")
+    print("✅ Load Test Passed")
+
+except Exception as e:
+    print(f"❌ Load Test Failed: {e}")
