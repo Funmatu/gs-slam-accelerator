@@ -1,10 +1,10 @@
-This file is a merged representation of the entire codebase, combined into a single document by Repomix.
+This file is a merged representation of a subset of the codebase, containing files not matching ignore patterns, combined into a single document by Repomix.
 
 <file_summary>
 This section contains a summary of this file.
 
 <purpose>
-This file contains a packed representation of the entire repository's contents.
+This file contains a packed representation of a subset of the repository's contents that is considered the most important context.
 It is designed to be easily consumable by AI systems for analysis, code review,
 or other automated processes.
 </purpose>
@@ -32,6 +32,7 @@ The content is organized as follows:
 <notes>
 - Some files may have been excluded based on .gitignore rules and Repomix's configuration
 - Binary files are not included in this packed representation. Please refer to the Repository Structure section for a complete list of file paths, including binary files
+- Files matching these patterns are excluded: data/
 - Files matching patterns in .gitignore are excluded
 - Files matching default ignore patterns are excluded
 - Files are sorted by Git change count (files with more changes are at the bottom)
@@ -45,6 +46,11 @@ The content is organized as follows:
     deploy.yml
 src/
   lib.rs
+  shader.wgsl
+tests/
+  debug_loaded.py
+  test_gpu.py
+  test_load.py
 www/
   index.html
   index.js
@@ -53,223 +59,547 @@ Cargo.toml
 LICENSE
 pyproject.toml
 README.md
-template_setup.py
 </directory_structure>
 
 <files>
 This section contains the contents of the repository's files.
 
-<file path=".github/workflows/deploy.yml">
-name: Deploy to GitHub Pages
+<file path="src/shader.wgsl">
+// src/shader.wgsl
 
-on:
-  # mainブランチにpushされたら実行
-  push:
-    branches: ["main"]
-  # ブラウザから手動で実行したい時用
-  workflow_dispatch:
+struct GaussianSplat {
+    pos: vec3<f32>,
+    opacity: f32,
+    scale: vec3<f32>,
+    _pad1: f32,
+    rot: vec4<f32>, // Quaternion (r, i, j, k)
+    sh_dc: vec3<f32>,
+    _pad2: f32,
+}
 
-permissions:
-  contents: write # gh-pagesブランチへの書き込み権限
+struct Surfel {
+    pos: vec3<f32>,      // 12 bytes
+    _pad0: f32,          // 4 bytes
+    normal: vec3<f32>,   // 12 bytes
+    _pad1: f32,          // 4 bytes
+    cov_row0: vec3<f32>, // 12 bytes (共分散行列 1行目)
+    _pad2: f32,
+    cov_row1: vec3<f32>, // 12 bytes (共分散行列 2行目)
+    _pad3: f32,
+    cov_row2: vec3<f32>, // 12 bytes (共分散行列 3行目)
+    _pad4: f32,
+}
 
-jobs:
-  build-and-deploy:
-    runs-on: ubuntu-latest
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
+@group(0) @binding(0)
+var<storage, read> input_splats: array<GaussianSplat>;
 
-      # Rust環境のセットアップ (キャッシュも効く現代的なAction)
-      - name: Setup Rust
-        uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: wasm32-unknown-unknown
+@group(0) @binding(1)
+var<storage, read_write> output_surfels: array<Surfel>;
 
-      # wasm-packのインストール
-      - name: Install wasm-pack
-        run: curl https://rustwasm.github.io/wasm-pack/installer/init.sh -sSf | sh
+// クォータニオンから回転行列への変換
+fn quat_to_mat3(q: vec4<f32>) -> mat3x3<f32> {
+    let r = q.x; let x = q.y; let y = q.z; let z = q.w;
+    
+    return mat3x3<f32>(
+        vec3<f32>(1.0 - 2.0*(y*y + z*z), 2.0*(x*y + r*z),       2.0*(x*z - r*y)),
+        vec3<f32>(2.0*(x*y - r*z),       1.0 - 2.0*(x*x + z*z), 2.0*(y*z + r*x)),
+        vec3<f32>(2.0*(x*z + r*y),       2.0*(y*z - r*x),       1.0 - 2.0*(x*x + y*y))
+    );
+}
 
-      # ビルド実行 (Releaseモードで最適化)
-      - name: Build WASM
-        # ハイブリッド構成なので、Web用フラグ(--features wasm)を明示的にONにする
-        run: wasm-pack build --target web --out-dir www/pkg --no-default-features --features wasm
-      
-      # CIサーバー上でのみ ルートと、pkg内部のgitignoreの両方を抹殺する。
-      # これにより、ユーザーのローカル環境は汚さずに、生成された pkg フォルダを強制的に認識させる。
-      - name: Remove .gitignore to allow deploying pkg
-        run: |
-          rm -f .gitignore
-          rm -f www/pkg/.gitignore
-      
-      # Jekyll処理を無効化するファイルを作成
-      - name: Create .nojekyll
-        run: touch www/.nojekyll
+@compute @workgroup_size(64)
+fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
+    let idx = global_id.x;
+    if (idx >= arrayLength(&input_splats)) {
+        return;
+    }
 
-      # GitHub Pagesへのデプロイ
-      - name: Deploy to GitHub Pages
-        uses: peaceiris/actions-gh-pages@v3
-        with:
-          github_token: ${{ secrets.GITHUB_TOKEN }}
-          publish_dir: ./www # このフォルダの中身を公開する
-          force_orphan: true # 履歴を溜め込まず、常に最新版だけで上書きする（軽量化）
+    let splat = input_splats[idx];
 
-# ======================================================================================
-#  [Reference] Python CI Job
-#  将来的にPythonモジュールの自動テストが必要になった場合、以下のコメントを解除してjobsに追加してください。
-#  (ローカルのUV環境で十分な場合は不要です)
-# ======================================================================================
-#   test-python:
-#     runs-on: ubuntu-latest
-#     steps:
-#       - uses: actions/checkout@v4
-#
-#       - name: Set up Python
-#         uses: actions/setup-python@v5
-#         with:
-#           python-version: '3.10'
-#
-#       # Python側でもRustコンパイラは必要
-#       - name: Install Rust
-#         uses: dtolnay/rust-toolchain@stable
-#
-#       - name: Install Maturin
-#         run: pip install maturin
-#
-#       - name: Build and Test Python Module
-#         # Releaseビルドでテストする場合、--release を追加してください
-#         run: |
-#           maturin develop --features python
-#           python -c "import nx_compute_rs; print(f'Test Result: {nx_compute_rs.compute_metrics(1000, 1.0)}')"
+    // 1. パラメータの正規化・変換
+    // 3DGSのスケールは exp() されていることが多いが、生データが exp 済みか確認が必要。
+    // 今回はバイナリ値が -6.0 程度だったため、exp() が必要と推測される。
+    let s = exp(splat.scale); 
+    
+    // クォータニオンの正規化
+    let q = normalize(splat.rot);
+    let R = quat_to_mat3(q);
+    
+    // スケール行列 S (対角成分のみ)
+    let S = mat3x3<f32>(
+        vec3<f32>(s.x, 0.0, 0.0),
+        vec3<f32>(0.0, s.y, 0.0),
+        vec3<f32>(0.0, 0.0, s.z)
+    );
+
+    // 2. 法線の抽出 (最小スケールの軸を選択)
+    // Rの列ベクトルはそれぞれローカル軸 (x, y, z) のワールド方向を表す
+    var normal = vec3<f32>(0.0, 0.0, 0.0);
+    
+    if (s.x <= s.y && s.x <= s.z) {
+        normal = R[0]; // Rの1列目
+    } else if (s.y <= s.x && s.y <= s.z) {
+        normal = R[1]; // Rの2列目
+    } else {
+        normal = R[2]; // Rの3列目
+    }
+
+    // 3. 共分散行列の計算: Sigma = R * S * S^T * R^T
+    // M = R * S
+    let M = R * S; 
+    let Sigma = M * transpose(M); // M * M^T
+
+    // 4. 結果の書き込み
+    output_surfels[idx].pos = splat.pos;
+    output_surfels[idx].normal = normal;
+    output_surfels[idx].cov_row0 = Sigma[0];
+    output_surfels[idx].cov_row1 = Sigma[1];
+    output_surfels[idx].cov_row2 = Sigma[2];
+}
+</file>
+
+<file path="tests/debug_loaded.py">
+import struct
+
+filename = "data/object_0.ply"
+
+with open(filename, "rb") as f:
+    # 1. ヘッダーを読み飛ばす（end_headerを探す）
+    content = b""
+    while True:
+        chunk = f.read(1)
+        content += chunk
+        if b"end_header" in content:
+            # 改行コードの処理（\n または \r\n）
+            char = f.read(1)
+            if char == b"\r":
+                f.read(1)  # \nをスキップ
+            break
+
+    print("--- Binary Header End ---")
+
+    # 2. 最初の頂点のデータを読み込む
+    # ヘッダーによると: x, y, z, nx, ny, nz, f_dc_0...rot_3 (合計17個のfloat)
+    # float32 (4bytes) * 17 = 68 bytes
+
+    data = f.read(68)
+    if len(data) < 68:
+        print("Error: Not enough data for one vertex")
+        exit()
+
+    # 3. float32 (Little Endian) として解釈
+    # <f: Little Endian float
+    values = struct.unpack("<17f", data)
+
+    properties = [
+        "x",
+        "y",
+        "z",
+        "nx",
+        "ny",
+        "nz",
+        "f_dc_0",
+        "f_dc_1",
+        "f_dc_2",
+        "opacity",
+        "scale_0",
+        "scale_1",
+        "scale_2",
+        "rot_0",
+        "rot_1",
+        "rot_2",
+        "rot_3",
+    ]
+
+    print(f"{'Property':<10} | {'Value':<20}")
+    print("-" * 35)
+    for name, val in zip(properties, values):
+        print(f"{name:<10} | {val:.6f}")
+</file>
+
+<file path="tests/test_gpu.py">
+import gs_slam_core
+import time
+
+ply_path = "data/object_0.ply"  # パスは適宜変更
+
+print("1. Loading PLY...")
+manager = gs_slam_core.SplatManager(ply_path)
+print(f"Loaded {manager.count()} splats.")
+
+print("2. Running GPU Compute...")
+start = time.time()
+
+# ここでGPUが火を吹きます
+count = manager.compute_geometry()
+
+elapsed = (time.time() - start) * 1000
+print(f"Computed {count} surfels in {elapsed:.2f} ms")
+
+print("3. Result Validation")
+print(manager.debug_first_surfel())
+</file>
+
+<file path="tests/test_load.py">
+import gs_slam_core
+import time
+import os
+
+# Ensure you have a valid .ply file from a 3DGS training result
+ply_file = "data/object_0.ply"
+
+if not os.path.exists(ply_file):
+    print(f"Please provide a valid path. File not found: {ply_file}")
+    exit(1)
+
+print(f"Loading {ply_file}...")
+start_time = time.time()
+
+# This triggers Rust mmap + parsing
+manager = gs_slam_core.SplatManager(ply_file)
+
+end_time = time.time()
+elapsed = (end_time - start_time) * 1000
+
+count = manager.count()
+print(f"--------------------------------------------------")
+print(f"Loaded {count:,} splats in {elapsed:.2f} ms")
+print(f"Throughput: {count / (elapsed / 1000) / 1_000_000:.2f} M splats/sec")
+print(f"First Splat Data: {manager.debug_first_splat()}")
+print(f"--------------------------------------------------")
 </file>
 
 <file path="src/lib.rs">
-use std::f64::consts::PI;
+use std::fs::File;
+use std::path::Path;
+use std::borrow::Cow;
 
-// Rayonのプレリュード（並列化用ツール）をインポート
-#[cfg(not(target_family = "wasm"))]
-use rayon::prelude::*;
+use pyo3::prelude::*;
+use memmap2::MmapOptions;
+use bytemuck::{Pod, Zeroable};
+use wgpu::util::DeviceExt;
 
-/// Core Algorithm
-/// use_parallel: trueなら並列化（Nativeのみ有効）、falseなら直列
-fn core_algorithm(iterations: u64, param: f64, use_parallel: bool) -> f64 {
-    // 【Native (Python) かつ Parallel ON の場合】
-    #[cfg(not(target_family = "wasm"))]
-    if use_parallel {
-        return (0..iterations)
-            .into_par_iter() // <--- ここが魔法！ par_iterにするだけ
-            .map(|i| {
-                let x = (i as f64) * PI / 180.0;
-                (x * param).sin() * (x * param).cos()
-            })
-            .sum();
+// -----------------------------------------------------------------------------
+// 1. Data Structures
+// -----------------------------------------------------------------------------
+
+#[repr(C)]
+#[derive(Copy, Clone, Debug, Default, Pod, Zeroable)]
+pub struct GaussianSplat {
+    pub pos: [f32; 3],      // 12
+    pub opacity: f32,       // 4
+    pub scale: [f32; 3],    // 12
+    pub _pad1: f32,         // 4
+    pub rot: [f32; 4],      // 16
+    pub sh_dc: [f32; 3],    // 12
+    pub _pad2: f32,         // 4
+}
+
+#[repr(C)]
+#[derive(Copy, Clone, Debug, Default, Pod, Zeroable)]
+pub struct Surfel {
+    pub pos: [f32; 3],
+    pub _pad0: f32,
+    pub normal: [f32; 3],
+    pub _pad1: f32,
+    pub cov_row0: [f32; 3],
+    pub _pad2: f32,
+    pub cov_row1: [f32; 3],
+    pub _pad3: f32,
+    pub cov_row2: [f32; 3],
+    pub _pad4: f32,
+}
+
+#[repr(C, packed)]
+#[derive(Copy, Clone, Debug, Default, Pod, Zeroable)]
+struct RawSplat {
+    x: f32, y: f32, z: f32,
+    nx: f32, ny: f32, nz: f32,
+    f_dc_0: f32, f_dc_1: f32, f_dc_2: f32,
+    opacity: f32,
+    scale_0: f32, scale_1: f32, scale_2: f32,
+    rot_0: f32, rot_1: f32, rot_2: f32, rot_3: f32,
+}
+
+// -----------------------------------------------------------------------------
+// 2. GPU Logic
+// -----------------------------------------------------------------------------
+
+async fn run_compute_shader(splats: &[GaussianSplat]) -> Vec<Surfel> {
+    // 1. インスタンス作成: 全てのバックエンドを許可 (Vulkan, GL, DX12, Metal)
+    let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
+        // backends: wgpu::Backends::all(), 
+        backends: wgpu::Backends::VULKAN,
+        ..Default::default()
+    });
+    
+    // -------------------------------------------------------------------------
+    // 2. アダプターの列挙と選択 (デバッグ表示付き)
+    // -------------------------------------------------------------------------
+    println!("[GPU Debug] Enumerating Vulkan adapters...");
+    let adapters = instance.enumerate_adapters(wgpu::Backends::VULKAN);
+    
+    if adapters.is_empty() {
+        println!("[GPU Error] No Vulkan adapters found!");
+        println!("[GPU Hint] WSL2? Try: sudo apt install mesa-vulkan-drivers vulkan-tools");
+        panic!("No Vulkan-compatible GPU found.");
     }
 
-    // 【WASM または Parallel OFF の場合】
-    (0..iterations)
-        .into_iter() // 通常のイテレータ
-        .map(|i| {
-            let x = (i as f64) * PI / 180.0;
-            (x * param).sin() * (x * param).cos()
+    for (i, adapter) in adapters.iter().enumerate() {
+        let info = adapter.get_info();
+        println!("  [{}] {:?} ({:?})", i, info.name, info.backend);
+    }
+
+    // 最も高性能なアダプタを要求
+    // let adapter = instance.request_adapter(&wgpu::RequestAdapterOptions {
+    //     power_preference: wgpu::PowerPreference::HighPerformance,
+    //     compatible_surface: None,
+    //     force_fallback_adapter: false,
+    // })
+    // .await
+    // .expect("Failed to select a Vulkan adapter.");
+    let adapter = adapters.into_iter()
+        .filter(|a| {
+            let info = a.get_info();
+            // OpenGL系は除外
+            info.backend != wgpu::Backend::Gl && info.backend != wgpu::Backend::BrowserWebGpu
         })
-        .sum()
+        .max_by_key(|a| {
+            // 優先順位: Vulkan > DX12 > Metal > その他
+            let info = a.get_info();
+            match info.backend {
+                wgpu::Backend::Vulkan => 3,
+                wgpu::Backend::Dx12 => 2,
+                wgpu::Backend::Metal => 2,
+                _ => 1,
+            }
+        });
+
+    let adapter = match adapter {
+        Some(a) => a,
+        None => panic!("[GPU Error] Adapters found, but all were OpenGL (which crashes WSL2). Enable Vulkan or DX12!"),
+    };
+
+    let info = adapter.get_info();
+    println!("[GPU Debug] Selected: {:?} ({:?})", info.name, info.backend);
+
+    // -------------------------------------------------------------------------
+    // 3. デバイスとキューの取得
+    // -------------------------------------------------------------------------
+    let (device, queue) = adapter.request_device(
+        &wgpu::DeviceDescriptor {
+            label: None,
+            required_features: wgpu::Features::empty(),
+            required_limits: wgpu::Limits::downlevel_defaults(),
+        },
+        None,
+    ).await.expect("Failed to create device");
+
+    // -------------------------------------------------------------------------
+    // 4. バッファ・シェーダー・パイプライン
+    // -------------------------------------------------------------------------
+    let input_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+        label: Some("Input Buffer"),
+        contents: bytemuck::cast_slice(splats),
+        usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+    });
+
+    let output_size = (splats.len() * std::mem::size_of::<Surfel>()) as u64;
+    let output_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some("Output Buffer"),
+        size: output_size,
+        usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
+        mapped_at_creation: false,
+    });
+    
+    let staging_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some("Staging Buffer"),
+        size: output_size,
+        usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
+        mapped_at_creation: false,
+    });
+
+    // 3. パイプラインの構築
+    let shader_source = include_str!("shader.wgsl");
+    let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+        label: Some("Compute Shader"),
+        source: wgpu::ShaderSource::Wgsl(Cow::Borrowed(shader_source)),
+    });
+
+    let bind_group_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+        label: None,
+        entries: &[
+            wgpu::BindGroupLayoutEntry {
+                binding: 0,
+                visibility: wgpu::ShaderStages::COMPUTE,
+                ty: wgpu::BindingType::Buffer { 
+                    ty: wgpu::BufferBindingType::Storage { read_only: true }, 
+                    has_dynamic_offset: false, 
+                    min_binding_size: None 
+                },
+                count: None,
+            },
+            wgpu::BindGroupLayoutEntry {
+                binding: 1,
+                visibility: wgpu::ShaderStages::COMPUTE,
+                ty: wgpu::BindingType::Buffer { 
+                    ty: wgpu::BufferBindingType::Storage { read_only: false }, 
+                    has_dynamic_offset: false, 
+                    min_binding_size: None 
+                },
+                count: None,
+            },
+        ],
+    });
+
+    let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+        label: None,
+        bind_group_layouts: &[&bind_group_layout],
+        push_constant_ranges: &[],
+    });
+
+    let pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+        label: None,
+        layout: Some(&pipeline_layout),
+        module: &shader,
+        entry_point: "main",
+    });
+
+    let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+        label: None,
+        layout: &bind_group_layout,
+        entries: &[
+            wgpu::BindGroupEntry { binding: 0, resource: input_buffer.as_entire_binding() },
+            wgpu::BindGroupEntry { binding: 1, resource: output_buffer.as_entire_binding() },
+        ],
+    });
+
+    // 4. コマンドの発行
+    let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
+    {
+        let mut cpass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor { label: None, timestamp_writes: None });
+        cpass.set_pipeline(&pipeline);
+        cpass.set_bind_group(0, &bind_group, &[]);
+        
+        let workgroups = (splats.len() as u32 + 63) / 64;
+        cpass.dispatch_workgroups(workgroups, 1, 1);
+    }
+    
+    encoder.copy_buffer_to_buffer(&output_buffer, 0, &staging_buffer, 0, output_size);
+    queue.submit(Some(encoder.finish()));
+
+    // 5. 結果の取得
+    let buffer_slice = staging_buffer.slice(..);
+    let (sender, receiver) = futures_intrusive::channel::shared::oneshot_channel();
+    buffer_slice.map_async(wgpu::MapMode::Read, move |v| sender.send(v).unwrap());
+
+    device.poll(wgpu::Maintain::Wait);
+    
+    if let Some(Ok(())) = receiver.receive().await {
+        let data = buffer_slice.get_mapped_range();
+        let result: Vec<Surfel> = bytemuck::cast_slice(&data).to_vec();
+        drop(data);
+        staging_buffer.unmap();
+        result
+    } else {
+        panic!("Failed to receive buffer map result");
+    }
 }
 
 // -----------------------------------------------------------------------------
-// Module: Python Interface (PyO3)
+// 3. Python Interface
 // -----------------------------------------------------------------------------
-#[cfg(feature = "python")]
-use pyo3::prelude::*;
 
-#[cfg(feature = "python")]
-#[pyfunction]
-// 引数に parallel を追加
-fn compute_metrics(iterations: u64, param: f64, parallel: bool) -> PyResult<f64> {
-    Ok(core_algorithm(iterations, param, parallel))
+#[pyclass]
+struct SplatManager {
+    splats: Vec<GaussianSplat>,
+    surfels: Vec<Surfel>, // 計算結果キャッシュ
 }
 
-#[cfg(feature = "python")]
+#[pymethods]
+impl SplatManager {
+    #[new]
+    fn new(ply_path: String) -> PyResult<Self> {
+        // ... (Phase 1 と同じ読み込みコード) ...
+        let path = Path::new(&ply_path);
+        let file = File::open(path).map_err(|e| pyo3::exceptions::PyFileNotFoundError::new_err(e.to_string()))?;
+        let mmap = unsafe { MmapOptions::new().map(&file).map_err(|e| pyo3::exceptions::PyIOError::new_err(e.to_string()))? };
+
+        let header_end_pattern = b"end_header";
+        let search_limit = std::cmp::min(mmap.len(), 4096);
+        let data_start_offset = if let Some(pos) = mmap[..search_limit].windows(header_end_pattern.len()).position(|w| w == header_end_pattern) {
+            let mut cursor = pos + header_end_pattern.len();
+            while cursor < mmap.len() && (mmap[cursor] == b'\r' || mmap[cursor] == b'\n') { cursor += 1; }
+            cursor
+        } else {
+            return Err(pyo3::exceptions::PyValueError::new_err("Invalid PLY"));
+        };
+
+        let raw_data = &mmap[data_start_offset..];
+        let struct_size = std::mem::size_of::<RawSplat>();
+        let count = raw_data.len() / struct_size;
+        let mut splats = Vec::with_capacity(count);
+        let raw_splats: &[RawSplat] = bytemuck::cast_slice(&raw_data[..count * struct_size]);
+
+        for raw in raw_splats {
+            splats.push(GaussianSplat {
+                pos: [raw.x, raw.y, raw.z],
+                opacity: raw.opacity,
+                scale: [raw.scale_0, raw.scale_1, raw.scale_2],
+                _pad1: 0.0,
+                rot: [raw.rot_0, raw.rot_1, raw.rot_2, raw.rot_3],
+                sh_dc: [raw.f_dc_0, raw.f_dc_1, raw.f_dc_2],
+                _pad2: 0.0,
+            });
+        }
+
+        Ok(SplatManager { splats, surfels: Vec::new() })
+    }
+
+    fn count(&self) -> usize { self.splats.len() }
+
+    fn debug_first_splat(&self) -> PyResult<String> {
+        if let Some(s) = self.splats.first() {
+            Ok(format!(
+                "Pos: [{:.4}, {:.4}, {:.4}], Opacity: {:.4}, Scale: [{:.4}, ...]",
+                s.pos[0], s.pos[1], s.pos[2],
+                s.opacity,
+                s.scale[0]
+            ))
+        } else {
+            Ok("No splats loaded".to_string())
+        }
+    }
+
+    /// GPUコンピュートを実行し、法線と共分散行列を計算する
+    fn compute_geometry(&mut self) -> PyResult<usize> {
+        if self.splats.is_empty() { return Ok(0); }
+        
+        // pollster::block_on で非同期関数を同期的に実行
+        self.surfels = pollster::block_on(run_compute_shader(&self.splats));
+        
+        Ok(self.surfels.len())
+    }
+
+    /// デバッグ用：最初のサーフェル情報を取得
+    fn debug_first_surfel(&self) -> PyResult<String> {
+        if let Some(s) = self.surfels.first() {
+            Ok(format!(
+                "Normal: [{:.4}, {:.4}, {:.4}], Cov[0]: [{:.4}, ...]",
+                s.normal[0], s.normal[1], s.normal[2],
+                s.cov_row0[0]
+            ))
+        } else {
+            Ok("No surfels computed. Run compute_geometry() first.".to_string())
+        }
+    }
+}
+
 #[pymodule]
-fn nx_compute_rs(_py: Python, m: &PyModule) -> PyResult<()> {
-    m.add_function(wrap_pyfunction!(compute_metrics, m)?)?;
+fn gs_slam_core(m: &Bound<'_, PyModule>) -> PyResult<()> {
+    m.add_class::<SplatManager>()?;
     Ok(())
 }
-
-// -----------------------------------------------------------------------------
-// Module: WebAssembly Interface (wasm-bindgen)
-// -----------------------------------------------------------------------------
-#[cfg(feature = "wasm")]
-use wasm_bindgen::prelude::*;
-
-#[cfg(feature = "wasm")]
-#[wasm_bindgen]
-// 引数に parallel を追加 (WASMでは内部で無視されるがIFは合わせる)
-pub fn compute_metrics_js(iterations: u64, param: f64, parallel: bool) -> f64 {
-    core_algorithm(iterations, param, parallel)
-}
-</file>
-
-<file path="www/index.html">
-<!DOCTYPE html>
-<html lang="en">
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>nx-compute-rs Demo</title>
-    <style>
-        body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; max-width: 800px; margin: 2rem auto; padding: 0 1rem; line-height: 1.6; }
-        h1 { border-bottom: 2px solid #eee; padding-bottom: 0.5rem; }
-        .card { border: 1px solid #ddd; padding: 1.5rem; border-radius: 8px; box-shadow: 0 2px 4px rgba(0,0,0,0.05); }
-        button { background-color: #0070f3; color: white; border: none; padding: 0.8rem 1.5rem; border-radius: 5px; cursor: pointer; font-size: 1rem; }
-        button:hover { background-color: #005bb5; }
-        button:disabled { background-color: #ccc; cursor: not-allowed; }
-        #output { margin-top: 1rem; padding: 1rem; background: #f5f5f5; border-radius: 5px; font-family: monospace; }
-    </style>
-</head>
-<body>
-    <h1>nx-compute-rs</h1>
-    <p>R&D Dual-Runtime Architecture Proof of Concept.</p>
-    
-    <div class="card">
-        <h3>WebAssembly Computation</h3>
-        <p>Run the rigorous Rust backend directly in your browser.</p>
-        <button id="run-btn" disabled>Loading WASM...</button>
-        <div id="output">Waiting for input...</div>
-    </div>
-
-    <script type="module" src="./index.js"></script>
-</body>
-</html>
-</file>
-
-<file path="www/index.js">
-import init, { compute_metrics_js } from './pkg/nx_compute_rs.js';
-
-async function run() {
-    await init(); // Initialize WASM
-    
-    const btn = document.getElementById('run-btn');
-    const output = document.getElementById('output');
-    
-    btn.innerText = "Run Core Algorithm (10M iters)";
-    btn.disabled = false;
-
-    btn.addEventListener('click', () => {
-        output.innerText = "Computing...";
-        
-        // Use setTimeout to allow UI to update before blocking main thread
-        setTimeout(() => {
-            const start = performance.now();
-            
-            // Call Rust function
-            const result = compute_metrics_js(10_000_000n, 1.5);
-            
-            const end = performance.now();
-            output.innerText = `Result: ${result.toFixed(6)}\nTime: ${(end - start).toFixed(2)} ms`;
-        }, 10);
-    });
-}
-
-run();
 </file>
 
 <file path=".gitignore">
@@ -349,41 +679,6 @@ ehthumbs.db
 *.swp
 </file>
 
-<file path="Cargo.toml">
-[package]
-name = "nx-compute-rs"
-version = "0.1.0"
-edition = "2021"
-authors = ["R&D Researcher <your.email@example.com>"]
-description = "A dual-runtime computation core for WebAssembly and Python, powered by Rust."
-
-[lib]
-name = "nx_compute_rs"
-crate-type = ["cdylib"]
-
-[features]
-default = ["wasm"]
-wasm = ["dep:wasm-bindgen"]
-python = ["dep:pyo3"]
-
-[dependencies]
-# Common dependencies (Math, etc.)
-serde = { version = "1.0", features = ["derive"] }
-
-# Feature: WebAssembly
-wasm-bindgen = { version = "0.2", optional = true }
-
-# Feature: Python
-pyo3 = { version = "0.20", features = ["extension-module"], optional = true }
-
-rayon = "1.10"
-
-[profile.release]
-lto = true
-opt-level = 3
-codegen-units = 1
-</file>
-
 <file path="LICENSE">
 MIT License
 
@@ -406,22 +701,6 @@ AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
 LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
-</file>
-
-<file path="pyproject.toml">
-[build-system]
-requires = ["maturin>=1.0,<2.0"]
-build-backend = "maturin"
-
-[project]
-name = "nx_compute_rs"
-requires-python = ">=3.8"
-classifiers = [
-    "Programming Language :: Rust",
-    "Programming Language :: Python :: Implementation :: CPython",
-    "Programming Language :: Python :: Implementation :: PyPy",
-]
-dynamic = ["version"]
 </file>
 
 <file path="README.md">
@@ -581,65 +860,197 @@ This repository uses **GitHub Actions** to automatically deploy the Web version.
 *Author: Funmatu*
 </file>
 
-<file path="template_setup.py">
-# template_setup.py
-import os
-import sys
+<file path=".github/workflows/deploy.yml">
+name: Deploy to GitHub Pages
 
+on:
+  # mainブランチにpushされたら実行
+  push:
+    branches: ["main"]
+  # ブラウザから手動で実行したい時用
+  workflow_dispatch:
 
-def replace_in_file(filepath, old_kebab, new_kebab, old_snake, new_snake):
-    try:
-        with open(filepath, "r", encoding="utf-8") as f:
-            content = f.read()
+permissions:
+  contents: write # gh-pagesブランチへの書き込み権限
 
-        new_content = content.replace(old_kebab, new_kebab).replace(
-            old_snake, new_snake
-        )
+jobs:
+  build-and-deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
 
-        if content != new_content:
-            with open(filepath, "w", encoding="utf-8") as f:
-                f.write(new_content)
-            print(f"Updated: {filepath}")
-    except FileNotFoundError:
-        print(f"Skipped (not found): {filepath}")
+      # Rust環境のセットアップ (キャッシュも効く現代的なAction)
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
 
+      # wasm-packのインストール
+      - name: Install wasm-pack
+        run: curl https://rustwasm.github.io/wasm-pack/installer/init.sh -sSf | sh
 
-def main():
-    if len(sys.argv) < 2:
-        print("Usage: python template_setup.py <new-project-name>")
-        print("Example: python template_setup.py my-robot-sim")
-        return
+      # ビルド実行 (Releaseモードで最適化)
+      - name: Build WASM
+        # ハイブリッド構成なので、Web用フラグ(--features wasm)を明示的にONにする
+        run: wasm-pack build --target web --out-dir www/pkg --no-default-features --features wasm
+      
+      # CIサーバー上でのみ ルートと、pkg内部のgitignoreの両方を抹殺する。
+      # これにより、ユーザーのローカル環境は汚さずに、生成された pkg フォルダを強制的に認識させる。
+      - name: Remove .gitignore to allow deploying pkg
+        run: |
+          rm -f .gitignore
+          rm -f www/pkg/.gitignore
+      
+      # Jekyll処理を無効化するファイルを作成
+      - name: Create .nojekyll
+        run: touch www/.nojekyll
 
-    new_name_kebab = sys.argv[1]  # 例: my-robot-sim
-    new_name_snake = new_name_kebab.replace("-", "_")  # 例: my_robot_sim
+      # GitHub Pagesへのデプロイ
+      - name: Deploy to GitHub Pages
+        uses: peaceiris/actions-gh-pages@v3
+        with:
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          publish_dir: ./www # このフォルダの中身を公開する
+          force_orphan: true # 履歴を溜め込まず、常に最新版だけで上書きする（軽量化）
 
-    # 現在のプロジェクト名（テンプレートの元名）
-    OLD_NAME_KEBAB = "nx-compute-rs"
-    OLD_NAME_SNAKE = "nx_compute_rs"
+# ======================================================================================
+#  [Reference] Python CI Job
+#  将来的にPythonモジュールの自動テストが必要になった場合、以下のコメントを解除してjobsに追加してください。
+#  (ローカルのUV環境で十分な場合は不要です)
+# ======================================================================================
+#   test-python:
+#     runs-on: ubuntu-latest
+#     steps:
+#       - uses: actions/checkout@v4
+#
+#       - name: Set up Python
+#         uses: actions/setup-python@v5
+#         with:
+#           python-version: '3.10'
+#
+#       # Python側でもRustコンパイラは必要
+#       - name: Install Rust
+#         uses: dtolnay/rust-toolchain@stable
+#
+#       - name: Install Maturin
+#         run: pip install maturin
+#
+#       - name: Build and Test Python Module
+#         # Releaseビルドでテストする場合、--release を追加してください
+#         run: |
+#           maturin develop --features python
+#           python -c "import gs_slam_ccelerator; print(f'Test Result: {gs_slam_ccelerator.compute_metrics(1000, 1.0)}')"
+</file>
 
-    # 書き換え対象のファイルリスト
-    target_files = [
-        "Cargo.toml",
-        "pyproject.toml",
-        "www/index.js",
-        "www/index.html",
-        ".github/workflows/deploy.yml",
-    ]
+<file path="www/index.html">
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>gs-slam-ccelerator Demo</title>
+    <style>
+        body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; max-width: 800px; margin: 2rem auto; padding: 0 1rem; line-height: 1.6; }
+        h1 { border-bottom: 2px solid #eee; padding-bottom: 0.5rem; }
+        .card { border: 1px solid #ddd; padding: 1.5rem; border-radius: 8px; box-shadow: 0 2px 4px rgba(0,0,0,0.05); }
+        button { background-color: #0070f3; color: white; border: none; padding: 0.8rem 1.5rem; border-radius: 5px; cursor: pointer; font-size: 1rem; }
+        button:hover { background-color: #005bb5; }
+        button:disabled { background-color: #ccc; cursor: not-allowed; }
+        #output { margin-top: 1rem; padding: 1rem; background: #f5f5f5; border-radius: 5px; font-family: monospace; }
+    </style>
+</head>
+<body>
+    <h1>gs-slam-ccelerator</h1>
+    <p>R&D Dual-Runtime Architecture Proof of Concept.</p>
+    
+    <div class="card">
+        <h3>WebAssembly Computation</h3>
+        <p>Run the rigorous Rust backend directly in your browser.</p>
+        <button id="run-btn" disabled>Loading WASM...</button>
+        <div id="output">Waiting for input...</div>
+    </div>
 
-    print(f"Renaming project from '{OLD_NAME_KEBAB}' to '{new_name_kebab}'...")
+    <script type="module" src="./index.js"></script>
+</body>
+</html>
+</file>
 
-    for file in target_files:
-        replace_in_file(
-            file, OLD_NAME_KEBAB, new_name_kebab, OLD_NAME_SNAKE, new_name_snake
-        )
+<file path="www/index.js">
+import init, { compute_metrics_js } from './pkg/gs_slam_ccelerator.js';
 
-    print("\nDone! Don't forget to run:")
-    print(f"  rm template_setup.py")
-    print(f"  git commit -am 'setup: initialize project {new_name_kebab}'")
+async function run() {
+    await init(); // Initialize WASM
+    
+    const btn = document.getElementById('run-btn');
+    const output = document.getElementById('output');
+    
+    btn.innerText = "Run Core Algorithm (10M iters)";
+    btn.disabled = false;
 
+    btn.addEventListener('click', () => {
+        output.innerText = "Computing...";
+        
+        // Use setTimeout to allow UI to update before blocking main thread
+        setTimeout(() => {
+            const start = performance.now();
+            
+            // Call Rust function
+            const result = compute_metrics_js(10_000_000n, 1.5);
+            
+            const end = performance.now();
+            output.innerText = `Result: ${result.toFixed(6)}\nTime: ${(end - start).toFixed(2)} ms`;
+        }, 10);
+    });
+}
 
-if __name__ == "__main__":
-    main()
+run();
+</file>
+
+<file path="Cargo.toml">
+[package]
+name = "gs_slam_core"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+name = "gs_slam_core"
+crate-type = ["cdylib"]
+
+[dependencies]
+# UPDATE: Upgrade to 0.23 for Python 3.13 support
+pyo3 = { version = "0.23", features = ["extension-module"] }
+
+rayon = "1.8"
+wgpu = "0.19"
+pollster = "0.3"
+futures-intrusive = "0.5"
+
+bytemuck = { version = "1.14", features = ["derive"] }
+ply-rs = "0.1"
+memmap2 = "0.9"
+nalgebra = "0.32"
+
+[profile.release]
+lto = "fat"
+codegen-units = 1
+opt-level = 3
+</file>
+
+<file path="pyproject.toml">
+[build-system]
+requires = ["maturin>=1.0,<2.0"]
+build-backend = "maturin"
+
+[project]
+name = "gs_slam_ccelerator"
+requires-python = ">=3.8"
+classifiers = [
+    "Programming Language :: Rust",
+    "Programming Language :: Python :: Implementation :: CPython",
+    "Programming Language :: Python :: Implementation :: PyPy",
+]
+dynamic = ["version"]
 </file>
 
 </files>
