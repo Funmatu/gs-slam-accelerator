@@ -1,6 +1,4 @@
-// ============================================================================
-//  Super Resolution Compute Shader
-// ============================================================================
+// src/sr.wgsl
 
 struct GaussianSplat {
     pos: vec3<f32>,
@@ -46,26 +44,21 @@ fn quat_to_mat3(q: vec4<f32>) -> mat3x3<f32> {
     );
 }
 
-// PCG Hash for fast, high-quality random numbers
-fn pcg_hash(input: u32) -> u32 {
-    let state = input * 747796405u + 2891336453u;
-    let word = ((state >> ((state >> 28u) + 4u)) ^ state) * 277803737u;
-    return (word >> 22u) ^ word;
-}
-
-fn rand_float(seed: u32) -> f32 {
-    return f32(pcg_hash(seed)) / 4294967296.0;
-}
-
-// Box-Muller transform for Normal Distribution
-fn rand_normal(seed: u32) -> vec2<f32> {
-    let u1 = max(rand_float(seed), 1e-7); // avoid log(0)
-    let u2 = rand_float(seed + 137u);
+// 決定論的なパターン生成のためのヘルパー
+// Golden Angleに基づく螺旋配置は、円盤を均一に埋めるのに適している
+fn concentric_sample(index: u32, total: u32) -> vec2<f32> {
+    if (index == 0u) { return vec2<f32>(0.0, 0.0); }
     
-    let r = sqrt(-2.0 * log(u1));
-    let theta = 6.2831853 * u2;
+    // Golden Angle Spiral Distribution
+    // これにより、乱数を使わずに均一かつ密なサンプリングが可能
+    let theta = f32(index) * 2.3999632; // 2.399... = Golden Angle (radians)
+    let r = sqrt(f32(index) / f32(total)); // Area preserving radius
     
-    return vec2<f32>(r * cos(theta), r * sin(theta));
+    // r は 0.0~1.0。これをガウシアンの有効範囲（通常3シグマだが、SLAM用に1.0シグマに留める）にマップ
+    // 中心付近を重視するため、少し内側に寄せる (0.8倍)
+    let r_scaled = r * 0.8; 
+
+    return vec2<f32>(r_scaled * cos(theta), r_scaled * sin(theta));
 }
 
 @compute @workgroup_size(64)
@@ -75,68 +68,94 @@ fn compute_sr(@builtin(global_invocation_id) global_id: vec3<u32>) {
     
     if (idx >= total_surfels) { return; }
 
-    // Identify Parent Splat
     let parent_idx = idx / params.factor;
+    let child_idx = idx % params.factor; // 0 to factor-1
     let splat = input_splats[parent_idx];
 
-    // 1. Basic Geometry
-    let q = normalize(splat.rot);
-    let q_fixed = vec4<f32>(q.y, q.z, q.w, q.x); // w,x,y,z -> x,y,z,w mapping
-    let R = quat_to_mat3(q_fixed);
-    let s = abs(splat.scale);
-
-    // 2. Determine Local Normal (Min Scale Axis) & Tangent Plane
-    var local_n = vec3<f32>(0.0, 0.0, 1.0);
-    var mask = vec3<f32>(1.0, 1.0, 0.0); // xy plane sampling by default
+    // =========================================================
+    // 1. Strict Filtering for SLAM (精度向上のための選別)
+    // =========================================================
     
+    let s = abs(splat.scale);
+    let max_s = max(s.x, max(s.y, s.z));
+    let min_s = min(s.x, min(s.y, s.z));
+    
+    // アスペクト比チェック: 
+    // 球体に近い(min/max > 0.3)ものは「面」ではないため、SLAMの幾何拘束に使えない。
+    // オパシティチェック:
+    // 薄いものはノイズ。
+    var valid = true;
+    if (splat.opacity < 0.3) { valid = false; }
+    if (min_s / max_s > 0.4) { valid = false; } 
+
+    if (!valid) {
+        // 無効なSplatは「退化」させる（座標0またはNaNを入れる）
+        // ここでは安全のため親と同じ位置（オフセット0）にし、法線0としてマーキングする手もあるが、
+        // 単に親の位置に置いておく。
+        var out_invalid: Surfel;
+        out_invalid.pos = splat.pos;
+        out_invalid.color = vec3<f32>(0.0); // 黒くして目立たなくするか
+        out_invalid.normal = vec3<f32>(0.0);
+        output_surfels[idx] = out_invalid;
+        return;
+    }
+
+    // =========================================================
+    // 2. Geometry Calculation
+    // =========================================================
+
+    let q = normalize(splat.rot);
+    let q_fixed = vec4<f32>(q.y, q.z, q.w, q.x);
+    let R = quat_to_mat3(q_fixed);
+
+    // 法線と接平面軸の特定
+    var local_n = vec3<f32>(0.0, 0.0, 1.0);
+    var tangent_u = vec3<f32>(1.0, 0.0, 0.0);
+    var tangent_v = vec3<f32>(0.0, 1.0, 0.0);
+    var scale_u = s.x;
+    var scale_v = s.y;
+
     if (s.x < s.y && s.x < s.z) { 
         local_n = vec3<f32>(1.0, 0.0, 0.0); 
-        mask = vec3<f32>(0.0, 1.0, 1.0); // yz plane
+        tangent_u = vec3<f32>(0.0, 1.0, 0.0); scale_u = s.y;
+        tangent_v = vec3<f32>(0.0, 0.0, 1.0); scale_v = s.z;
     } else if (s.y < s.z) { 
         local_n = vec3<f32>(0.0, 1.0, 0.0); 
-        mask = vec3<f32>(1.0, 0.0, 1.0); // xz plane
+        tangent_u = vec3<f32>(1.0, 0.0, 0.0); scale_u = s.x;
+        tangent_v = vec3<f32>(0.0, 0.0, 1.0); scale_v = s.z;
     }
 
     let normal = normalize(R * local_n);
 
-    // 3. Sampling Logic
-    // If factor == 1, just use center (no offset).
-    // If factor > 1, sample from distribution.
-    var offset_local = vec3<f32>(0.0);
+    // =========================================================
+    // 3. Deterministic Planar Sampling (決定論的平面サンプリング)
+    // =========================================================
     
+    var offset_local = vec3<f32>(0.0);
+
     if (params.factor > 1u) {
-        // Unique seed per output point
-        let seed = idx * 19937u + params.factor; 
-        let rnd = rand_normal(seed); // vec2 (standard normal)
+        // 乱数ではなく、黄金角(Golden Angle)螺旋で配置
+        // これにより、常に均一で「平ら」な円盤が得られる
+        let sample_pt = concentric_sample(child_idx, params.factor); // vec2 (-1.0 ~ 1.0)
         
-        // Map random values to the 2 axes defined by 'mask'
-        // We use 1.0 sigma. 
-        // Note: 3DGS scale usually represents log-scale or direct covariance.
-        // Assuming 'scale' is standard deviation (sigma) here.
-        // We only perturb on the tangent plane (Disk Sampling).
-        
-        var r_idx = 0;
-        if (mask.x > 0.5) { offset_local.x = rnd[r_idx] * s.x; r_idx++; }
-        if (mask.y > 0.5) { offset_local.y = rnd[r_idx] * s.y; r_idx++; }
-        if (mask.z > 0.5) { offset_local.z = rnd[r_idx] * s.z; }
+        // 接平面上でのみ展開 (法線方向への移動はゼロ！)
+        // scale_u, scale_v は標準偏差(1 sigma)
+        offset_local = (tangent_u * sample_pt.x * scale_u) + (tangent_v * sample_pt.y * scale_v);
     }
 
     let pos_world = splat.pos + R * offset_local;
 
-    // 4. Color Logic (SH to RGB)
+    // SH to RGB
     let C0 = 0.2820947917;
     var rgb = 0.5 + C0 * splat.sh_dc;
     rgb = clamp(rgb, vec3<f32>(0.0), vec3<f32>(1.0));
 
-    // 5. Output
     var out: Surfel;
     out.pos = pos_world;
     out.color = rgb;
     out.normal = normal;
     
-    out._pad0 = 0.0;
-    out._pad1 = 0.0;
-    out._pad2 = 0.0;
+    out._pad0 = 0.0; out._pad1 = 0.0; out._pad2 = 0.0;
 
     output_surfels[idx] = out;
 }
