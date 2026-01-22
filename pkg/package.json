@@ -1,0 +1,15 @@
+{
+  "name": "gs_slam_core",
+  "type": "module",
+  "version": "0.1.0",
+  "files": [
+    "gs_slam_core_bg.wasm",
+    "gs_slam_core.js",
+    "gs_slam_core.d.ts"
+  ],
+  "main": "gs_slam_core.js",
+  "types": "gs_slam_core.d.ts",
+  "sideEffects": [
+    "./snippets/*"
+  ]
+}
