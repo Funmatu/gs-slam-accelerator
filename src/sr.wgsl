@@ -30,7 +30,7 @@ struct Params {
 @group(0) @binding(1) var<storage, read_write> output_surfels : array<Surfel>;
 @group(0) @binding(2) var<uniform> params : Params;
 
-// --- Math Helpers ---
+// --- Helpers ---
 
 fn quat_to_mat3(q: vec4<f32>) -> mat3x3<f32> {
     let x = q.x; let y = q.y; let z = q.z; let w = q.w;
@@ -44,21 +44,17 @@ fn quat_to_mat3(q: vec4<f32>) -> mat3x3<f32> {
     );
 }
 
-// 決定論的なパターン生成のためのヘルパー
-// Golden Angleに基づく螺旋配置は、円盤を均一に埋めるのに適している
+// Sigmoid function for opacity (if stored as logit)
+fn sigmoid(x: f32) -> f32 {
+    return 1.0 / (1.0 + exp(-x));
+}
+
 fn concentric_sample(index: u32, total: u32) -> vec2<f32> {
     if (index == 0u) { return vec2<f32>(0.0, 0.0); }
-    
-    // Golden Angle Spiral Distribution
-    // これにより、乱数を使わずに均一かつ密なサンプリングが可能
-    let theta = f32(index) * 2.3999632; // 2.399... = Golden Angle (radians)
-    let r = sqrt(f32(index) / f32(total)); // Area preserving radius
-    
-    // r は 0.0~1.0。これをガウシアンの有効範囲（通常3シグマだが、SLAM用に1.0シグマに留める）にマップ
-    // 中心付近を重視するため、少し内側に寄せる (0.8倍)
-    let r_scaled = r * 0.8; 
-
-    return vec2<f32>(r_scaled * cos(theta), r_scaled * sin(theta));
+    let theta = f32(index) * 2.3999632; // Golden Angle
+    let r = sqrt(f32(index) / f32(total));
+    // 0.8倍することで、ガウシアンの裾野(薄い部分)を避けて中心寄りに配置する
+    return vec2<f32>(r * 0.8 * cos(theta), r * 0.8 * sin(theta));
 }
 
 @compute @workgroup_size(64)
@@ -69,46 +65,61 @@ fn compute_sr(@builtin(global_invocation_id) global_id: vec3<u32>) {
     if (idx >= total_surfels) { return; }
 
     let parent_idx = idx / params.factor;
-    let child_idx = idx % params.factor; // 0 to factor-1
+    let child_idx = idx % params.factor;
     let splat = input_splats[parent_idx];
 
     // =========================================================
-    // 1. Strict Filtering for SLAM (精度向上のための選別)
+    // 1. Scale & Opacity Correction (重要！)
     // =========================================================
     
-    let s = abs(splat.scale);
+    // 【修正】スケールは対数で保存されているため、exp() で実数に戻す
+    let s = exp(splat.scale);
+    
+    // 【修正】オパシティもSigmoidを通す（一般的なPLYの場合）
+    // もしすでに0-1の範囲ならこの行は不要だが、通しても害は少ない
+    let opacity = sigmoid(splat.opacity);
+
+    // =========================================================
+    // 2. Filtering (SLAM用にノイズ除去)
+    // =========================================================
+
     let max_s = max(s.x, max(s.y, s.z));
     let min_s = min(s.x, min(s.y, s.z));
     
-    // アスペクト比チェック: 
-    // 球体に近い(min/max > 0.3)ものは「面」ではないため、SLAMの幾何拘束に使えない。
-    // オパシティチェック:
-    // 薄いものはノイズ。
     var valid = true;
-    if (splat.opacity < 0.3) { valid = false; }
-    if (min_s / max_s > 0.4) { valid = false; } 
+    
+    // オパシティ閾値 (薄い霧を除去)
+    if (opacity < 0.3) { valid = false; }
+    
+    // アスペクト比閾値 (球体に近い形状を除去し、平らな面だけ残す)
+    // 0.6以上の比率がある＝丸っこい＝壁ではない可能性
+    if (min_s / max_s > 0.6) { valid = false; } 
+
+    // スケールが大きすぎるものを除去（背景の巨大なビルボード等）
+    // シーンによりますが、極端に大きい板は精度を下げる要因
+    // if (max_s > 10.0) { valid = false; }
 
     if (!valid) {
-        // 無効なSplatは「退化」させる（座標0またはNaNを入れる）
-        // ここでは安全のため親と同じ位置（オフセット0）にし、法線0としてマーキングする手もあるが、
-        // 単に親の位置に置いておく。
+        // 無効な点は描画しない（縮退させる）
         var out_invalid: Surfel;
-        out_invalid.pos = splat.pos;
-        out_invalid.color = vec3<f32>(0.0); // 黒くして目立たなくするか
+        out_invalid.pos = vec3<f32>(0.0);
+        out_invalid.color = vec3<f32>(0.0);
         out_invalid.normal = vec3<f32>(0.0);
+        // padding
+        out_invalid._pad0 = 0.0; out_invalid._pad1 = 0.0; out_invalid._pad2 = 0.0;
         output_surfels[idx] = out_invalid;
         return;
     }
 
     // =========================================================
-    // 2. Geometry Calculation
+    // 3. Geometry Calculation
     // =========================================================
 
     let q = normalize(splat.rot);
     let q_fixed = vec4<f32>(q.y, q.z, q.w, q.x);
     let R = quat_to_mat3(q_fixed);
 
-    // 法線と接平面軸の特定
+    // 法線方向(最も薄い軸)を特定
     var local_n = vec3<f32>(0.0, 0.0, 1.0);
     var tangent_u = vec3<f32>(1.0, 0.0, 0.0);
     var tangent_v = vec3<f32>(0.0, 1.0, 0.0);
@@ -128,18 +139,16 @@ fn compute_sr(@builtin(global_invocation_id) global_id: vec3<u32>) {
     let normal = normalize(R * local_n);
 
     // =========================================================
-    // 3. Deterministic Planar Sampling (決定論的平面サンプリング)
+    // 4. Deterministic Planar Sampling
     // =========================================================
     
     var offset_local = vec3<f32>(0.0);
 
     if (params.factor > 1u) {
-        // 乱数ではなく、黄金角(Golden Angle)螺旋で配置
-        // これにより、常に均一で「平ら」な円盤が得られる
-        let sample_pt = concentric_sample(child_idx, params.factor); // vec2 (-1.0 ~ 1.0)
+        let sample_pt = concentric_sample(child_idx, params.factor);
         
-        // 接平面上でのみ展開 (法線方向への移動はゼロ！)
-        // scale_u, scale_v は標準偏差(1 sigma)
+        // 接平面上のみに展開。法線方向への移動はゼロ！
+        // これで「表面に張り付いた」点群になる
         offset_local = (tangent_u * sample_pt.x * scale_u) + (tangent_v * sample_pt.y * scale_v);
     }
 
