@@ -7,6 +7,9 @@ use wgpu::util::DeviceExt;
 #[cfg(any(feature = "python", feature = "wasm"))]
 use nalgebra as na;
 
+mod sr;
+
+
 // ============================================================================
 //  1. Data Structures (16-byte Aligned for WebGPU Compatibility)
 // ============================================================================
@@ -211,6 +214,22 @@ async fn run_compute_shader_headless(splats: &[GaussianSplat]) -> Result<Vec<Sur
     }
 }
 
+// ----------------------------------------------------------------------------
+//  Headless SR (for Python)
+// ----------------------------------------------------------------------------
+#[cfg(feature = "python")]
+async fn run_sr_headless(splats: &[GaussianSplat], factor: u32) -> Result<Vec<Surfel>, String> {
+    let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::default());
+    let adapter = instance.request_adapter(&wgpu::RequestAdapterOptions::default()).await.ok_or("No adapter")?;
+    let (device, queue) = adapter.request_device(&wgpu::DeviceDescriptor {
+        required_limits: wgpu::Limits::downlevel_defaults(),
+        ..Default::default()
+    }, None).await.map_err(|e| format!("{:?}", e))?;
+
+    let sr_pipeline = sr::SuperResolutionPipeline::new(&device);
+    sr_pipeline.run_and_readback(&device, &queue, splats, factor).await
+}
+
 // ============================================================================
 //  4. Python Module (PyO3)
 // ============================================================================
@@ -305,6 +324,20 @@ impl SplatManager {
             });
         }
         Ok(self.surfels.len())
+    }
+
+    // Super Resolution
+    fn compute_super_resolution(&mut self, factor: u32) -> PyResult<usize> {
+        if self.splats.is_empty() { return Ok(0); }
+        if factor < 1 { return Err(pyo3::exceptions::PyValueError::new_err("Factor must be >= 1")); }
+        
+        match pollster::block_on(run_sr_headless(&self.splats, factor)) {
+             Ok(res) => {
+                self.surfels = res;
+                Ok(self.surfels.len())
+            },
+            Err(e) => Err(pyo3::exceptions::PyRuntimeError::new_err(e)),
+        }
     }
 
     // 結果アクセサ
@@ -511,7 +544,10 @@ pub struct WasmViewer {
     surface: wgpu::Surface<'static>,
     config: wgpu::SurfaceConfiguration,
     render_pipeline: wgpu::RenderPipeline,
+
     compute_pipeline: wgpu::ComputePipeline,
+    sr_pipeline: Option<sr::SuperResolutionPipeline>, 
+
     bg_compute: Option<wgpu::BindGroup>,
     bg_render: Option<wgpu::BindGroup>,
     bgl_compute: wgpu::BindGroupLayout,
@@ -580,6 +616,9 @@ impl WasmViewer {
             label: Some("Compute Pipeline"), layout: Some(&pl_compute), module: &shader, entry_point: Some("compute_main"),
             compilation_options: Default::default(), cache: None,
         });
+
+        // Setup SR Pipeline
+        let sr_pipeline = Some(sr::SuperResolutionPipeline::new(&device));
 
         let uniform_buffer = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("Uniform"), size: 128, usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST, mapped_at_creation: false,
@@ -683,6 +722,7 @@ impl WasmViewer {
 
         Ok(Self {
             device, queue, surface, config, render_pipeline, compute_pipeline,
+            sr_pipeline, 
             bg_compute: None, bg_render, bgl_compute, bgl_render,
             uniform_buffer, vertex_buffer: None, num_vertices: 0,
             camera, display_mode: 0, _closures: closures,
@@ -743,6 +783,17 @@ impl WasmViewer {
             self.num_vertices = count as u32;
             self.bg_compute = Some(bg_compute);
             log::info!("Loaded {} splats.", count);
+        }
+    }
+
+    // --- SR Execution ---
+    pub fn compute_super_resolution(&mut self, factor: u32) {
+        if self.splats.is_empty() || factor < 1 { return; }
+        if let Some(sr) = &self.sr_pipeline {
+             let (output_buf, count) = sr.run(&self.device, &self.queue, &self.splats, factor);
+             self.vertex_buffer = Some(output_buf);
+             self.num_vertices = count;
+             log::info!("Super Resolution Complete: {} surfels generated (Factor: {})", count, factor);
         }
     }
 

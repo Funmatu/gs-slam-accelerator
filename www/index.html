@@ -16,6 +16,8 @@
         button { padding: 5px 10px; cursor: pointer; background: #444; color: white; border: 1px solid #666; }
         button:hover { background: #555; }
         button.active { background: #0077cc; border-color: #0099ff; }
+        input[type=range] { width: 100px; }
+        .row { display: flex; align-items: center; gap: 10px; }
         #status { font-size: 0.9em; color: #aaa; }
     </style>
 </head>
@@ -25,11 +27,19 @@
         <div>
             <input type="file" id="fileInput" accept=".ply">
         </div>
-        <div>
+        <div class="row">
             <label>Mode:</label>
-            <button id="btnRGB" class="active">RGB Color</button>
-            <button id="btnNormal">Normal Map</button>
+            <button id="btnRGB" class="active">RGB</button>
+            <button id="btnNormal">Normal</button>
         </div>
+        <hr style="width:100%; border:0; border-top:1px solid #555;">
+        <div class="row">
+            <label>Upsample:</label>
+            <input type="range" id="sliderSR" min="1" max="16" value="1" step="1">
+            <span id="valSR">1x</span>
+            <button id="btnApplySR">Apply</button>
+        </div>
+        <hr style="width:100%; border:0; border-top:1px solid #555;">
         <div>
             <button id="btnExport" disabled>Export PLY</button>
         </div>

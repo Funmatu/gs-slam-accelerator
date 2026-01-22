@@ -9,6 +9,10 @@ async function run() {
     const btnRGB = document.getElementById('btnRGB');
     const btnNormal = document.getElementById('btnNormal');
     const btnExport = document.getElementById('btnExport');
+    
+    const sliderSR = document.getElementById('sliderSR');
+    const valSR = document.getElementById('valSR');
+    const btnApplySR = document.getElementById('btnApplySR');
 
     // Resize Handling
     function resize() {
@@ -21,10 +25,9 @@ async function run() {
 
     try {
         const viewer = await WasmViewer.new("canvas");
-        window.viewer = viewer; // Make global for resize event
+        window.viewer = viewer; 
         statusDiv.innerText = "Ready.";
 
-        // Animation Loop
         function animate() {
             viewer.render();
             requestAnimationFrame(animate);
@@ -43,8 +46,12 @@ async function run() {
                 const data = new Uint8Array(buffer);
                 console.log(`Passing ${data.length} bytes to WASM`);
                 viewer.load_data(data);
-                statusDiv.innerText = `Rendering ${file.name} (${(data.length/1024/1024).toFixed(1)} MB)`;
+                statusDiv.innerText = `Rendering ${file.name}`;
                 btnExport.disabled = false;
+                
+                // Reset SR controls
+                sliderSR.value = 1;
+                valSR.innerText = "1x";
             } catch (err) {
                 console.error(err);
                 statusDiv.innerText = "Error loading file";
@@ -63,12 +70,33 @@ async function run() {
             btnNormal.classList.add('active');
         };
 
+        // Super Resolution Controls
+        sliderSR.oninput = () => {
+            valSR.innerText = `${sliderSR.value}x`;
+        };
+
+        btnApplySR.onclick = () => {
+            if (!window.viewer) return;
+            const factor = parseInt(sliderSR.value);
+            statusDiv.innerText = `Computing Super Resolution (${factor}x)...`;
+            
+            // Allow UI update
+            setTimeout(() => {
+                try {
+                    window.viewer.compute_super_resolution(factor);
+                    statusDiv.innerText = `Displaying Upsampled Geometry (${factor}x)`;
+                } catch(e) {
+                    console.error(e);
+                    statusDiv.innerText = "SR Computation Failed";
+                }
+            }, 10);
+        };
+
         // Export Functionality
         btnExport.onclick = () => {
             if (!window.viewer) return;
             statusDiv.innerText = "Generating PLY...";
             
-            // Allow UI update before freezing for generation
             setTimeout(() => {
                 try {
                     const data = window.viewer.export_ply();
@@ -93,7 +121,7 @@ async function run() {
 
     } catch (e) {
         console.error("Initialization failed:", e);
-        statusDiv.innerText = "WebGPU initialization failed. Check console.";
+        statusDiv.innerText = "WebGPU initialization failed.";
     }
 }
 
